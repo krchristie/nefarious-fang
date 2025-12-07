@@ -26,9 +26,7 @@ Notes
 The system does not yet enforce strict author identity resolution, and
 different spellings or formats may create duplicate author records.
 
-Author: Karen R. Christie
-CSM CIS 117 Final Project
-Date: Nov–Dec 2025
+
 """
 
 import sqlite3
@@ -44,7 +42,9 @@ from helpers_db import (
     lookup_book_and_freqs, load_book_list_from_db
 )
 
-
+# -------------------------------------------
+# function that reports progress log messages
+# -------------------------------------------
 def log_progress(msg):
     """
     Append a status message to the progress log text widget and scroll to the end.
@@ -87,7 +87,6 @@ def _center_window_over_master(dlg, master):
     y = my + (mh - h) // 2
     dlg.geometry(f"+{max(x,0)}+{max(y,0)}")
 
-
 class _GreenBaseDialog(Toplevel):
     """
     Base class for modal dialogs using the application's green visual theme.
@@ -114,7 +113,6 @@ class _GreenBaseDialog(Toplevel):
     def _on_cancel(self, *a):
         self.result = None
         self.destroy()
-
 
 def ask_green_string(master, title, prompt, initial="", allow_empty=False):
     """
@@ -178,7 +176,6 @@ def ask_green_string(master, title, prompt, initial="", allow_empty=False):
     _center_window_over_master(dlg, master)
     dlg.wait_window()
     return dlg.result
-
 
 def ask_green_integer(master, title, prompt, initial=None, minvalue=None, maxvalue=None):
     """
@@ -255,9 +252,9 @@ def ask_green_integer(master, title, prompt, initial=None, minvalue=None, maxval
     dlg.wait_window()
     return dlg.result
 
-# ---------------------------
-# GUI main
-# ---------------------------
+# -----------------------------------------
+# GUI main (window & layout initialization)
+# -----------------------------------------
 window = Tk()
 window.title("Parsing with Style with KRC: Project Gutenberg Books - Word Frequency Analyzer")
 window.configure(background="#C9F2CE")
@@ -283,31 +280,18 @@ window.option_add("*TCombobox*Listbox.foreground", "#0F4D21")
 window.option_add("*TCombobox*Listbox.selectBackground", "#8FFFA0")
 window.option_add("*TCombobox*Listbox.selectForeground", "#0F4D21")
 
-# UI elements will be created below; we need variables for some helpers
+# -----------------------------------------
+# GUI state variables initialization
+# -----------------------------------------
 book_choice = None
 id_map = {}
 gutenberg_id_var = StringVar()
 
-# ----------------------------------
-# DB -> GUI helpers that use widgets
-# ----------------------------------
-def refresh_dropdown():
-    """
-    Reload the book list from the database and repopulate the dropdown widget.
+# --------------------------------------------------------
+# GUI utilities
+# --------------------------------------------------------
 
-    Side effects
-    ------------
-    - Updates global variables `dropdown`, `book_choice`, and `id_map`
-    - Replaces dropdown values with the latest titles from the database
-    - Resets the displayed selection to '__ select a book __'
-    """
-    global dropdown, book_choice, id_map
-    new_book_list, new_id_map = load_book_list_from_db()
-    id_map = new_id_map
-    dropdown['values'] = new_book_list
-    book_choice.set("__ select a book __")
-
-
+# GUI utilities: input helper
 def get_requested_gutenberg_id():
     """
     Determine which Project Gutenberg ID the user intends to use.
@@ -342,16 +326,14 @@ def get_requested_gutenberg_id():
     except Exception:
         return None, "Invalid Project Gutenberg book ID."
 
-# ---------------------------
-# GUI Utility functions
-# ---------------------------
+# GUI utilities: linkout function
 def open_bio_shelf():
     """
     Open the Project Gutenberg biology bookshelf in the user's default web browser.
     """
     webbrowser.open("https://www.gutenberg.org/ebooks/bookshelf/669")
 
-
+# GUI utilities: styling of custom widgits
 class CustomButton(Button):
     """
     A stylized Tkinter Button with a green on gray theme and effects on clicking the button.
@@ -384,6 +366,22 @@ class CustomButton(Button):
     def on_hover(self, e): self.config(bg=self.hover_bg)
     def on_leave(self, e): self.config(bg=self.default_bg)
 
+# GUI utilities: DB access to provide data to GUI
+def refresh_dropdown():
+    """
+    Reload the book list from the database and repopulate the dropdown widget.
+
+    Side effects
+    ------------
+    - Updates global variables `dropdown`, `book_choice`, and `id_map`
+    - Replaces dropdown values with the latest titles from the database
+    - Resets the displayed selection to '__ select a book __'
+    """
+    global dropdown, book_choice, id_map
+    new_book_list, new_id_map = load_book_list_from_db()
+    id_map = new_id_map
+    dropdown['values'] = new_book_list
+    book_choice.set("__ select a book __")
 
 def show_top10_from_db(freq_rows, gutID_int):
     """
@@ -435,9 +433,8 @@ def show_top10_from_db(freq_rows, gutID_int):
             formatted_authors.append(f"{first} {last}")
     author_str = ", ".join(formatted_authors) if formatted_authors else "Unknown Author"
 
-    # ---- CORRECT TITLE LOGIC ----
     if title_row:
-        display_title = title_row[0].strip()   # FULL TITLE — NO STRIPPING
+        display_title = title_row[0].strip()
     else:
         display_title = f"Book {gutID_int}"    # fallback, rare
 
@@ -451,7 +448,7 @@ def show_top10_from_db(freq_rows, gutID_int):
     for word, count in sorted_rows[:10]:
         words_output.insert(END, f"{count:>16}  {word:<20} \n")
 
-
+# GUI utilities: reset & cleanup helpers
 def clear_fields():
     """
     Reset all user-input fields and clear displayed results/logs.
@@ -466,15 +463,12 @@ def clear_fields():
     progress_output.delete("1.0", END)
     words_output.delete("1.0", END)
 
-
 def close_window():
     """
     Close the Tkinter application cleanly without triggering an IDLE warning.
     """
     window.quit()      # Stops the Tkinter mainloop
     window.destroy()   # Closes the window completely
-
-
 
 # ---------------------------------
 # Main "click" handler (controller)
@@ -679,11 +673,8 @@ def click():
             return
 
         # Display results
-        cur.execute(
-            "SELECT word, word_count FROM wordFreqs WHERE projGutID=? ORDER BY word_count DESC LIMIT 10",
-            (gutID_int,)
-        )
-        freq_rows = cur.fetchall()
+        _, freq_rows = lookup_book_and_freqs(cur, gutID_int)
+
         show_top10_from_db(freq_rows, gutID_int)
 
     finally:
