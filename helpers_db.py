@@ -2,40 +2,57 @@
 helpers_db
 ==========
 
-Database helper functions for the Project Gutenberg word-frequency application.
+Database access layer for the Project Gutenberg word-frequency application.
 
-This module provides all interactions with the SQLite backend that can change the DB, including:
+This module centralizes all interaction with the SQLite backend. It provides
+helpers for creating and validating the database schema, inserting and
+retrieving book and author records, managing book–author relationships, storing
+computed word-frequency results, and producing cleaned labels for GUI display.
+All operations here are side-effect free with respect to the GUI and contain
+no printing or logging.
 
-- Ensuring the database schema exists
-- Creating or reusing author records
-- Retrieving stored book metadata and word-frequency results
-- Preparing a formatted list of books for GUI display
+Available functions
+-------------------
+- :func:`ensure_tables_exist`  
+    Create all required tables if they do not already exist.
 
-The database schema includes:
+- :func:`insert_book`  
+    Insert a book record unless it is already present.
 
-- ``author``: individual authors
-- ``book``: Project Gutenberg books
-- ``bookAuthors``: junction table linking books ↔ authors (supports multi-author texts)
-- ``wordFreqs``: stored top word-frequency results per book
+- :func:`get_or_create_author`  
+    Look up an author by name or insert a new one if absent.
 
-Public API
-----------
-.. autofunction:: ensure_tables_exist
-.. autofunction:: get_or_create_author
-.. autofunction:: lookup_book_and_freqs
-.. autofunction:: load_book_list_from_db
+- :func:`lookup_book_and_freqs`  
+    Retrieve a book record and any stored word-frequency results.
+
+- :func:`insert_book_author_links`  
+    Add ordered entries linking a book to one or more authors.
+
+- :func:`get_book_title`  
+    Return the stored title for a specific Project Gutenberg ID.
+
+- :func:`get_book_authors`  
+    Retrieve an ordered list of authors linked to a book.
+
+- :func:`store_word_frequencies`  
+    Store (or update) the top word-frequency results for a book.
+
+- :func:`load_book_list_from_db`  
+    Construct a cleaned display list of books and build a mapping suitable
+    for GUI dropdowns.
 
 Notes
 -----
-This module performs no GUI operations and no logging; callers are responsible
-for user-visible reporting. All functions assume a valid SQLite connection or
-cursor is provided.
+- This module performs **no GUI actions and no logging**. All user-visible
+  reporting must be performed by the caller.
+- All functions assume a valid SQLite connection or cursor is provided.
+- Schema is designed for normalized representation of books, authors, and
+  many-to-many author relationships.
 
 Author: Karen R. Christie
 CSM CIS 117 Final Project
 Date: November–December 2025
 """
-
 
 import sqlite3
 
@@ -44,17 +61,22 @@ DB_PATH = "ProjGutBooks.db"
 
 def ensure_tables_exist(con):
     """
-    Create all required SQLite tables if they do not already exist.
+    Create the full SQLite schema if it does not already exist.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Active database connection.
 
     Notes
     -----
-    • Safe to call repeatedly.
-    • No logging is performed; caller is responsible for any reporting.
-    • Schema reflects a normalized design where:
-        - author: stores authors
-        - book: stores books
-        - bookAuthors: junction table linking books ↔ authors
-        - wordFreqs: word frequency table linked to book
+    This function is safe to call repeatedly. It silently ensures all required
+    tables exist but performs no logging. The schema contains:
+
+    - ``author``: stores author names  
+    - ``book``: stores Project Gutenberg books  
+    - ``bookAuthors``: junction table linking books ↔ authors  
+    - ``wordFreqs``: stored top word-frequency results  
     """
     cur = con.cursor()
 
@@ -101,18 +123,41 @@ def ensure_tables_exist(con):
     con.commit()
 
 
-def get_or_create_author(cur, first, last):
+def insert_book(cur, gutID_int, title):
     """
-    Retrieve an existing author or insert a new one.
+    Insert a book record if it does not already exist.
 
     Parameters
     ----------
     cur : sqlite3.Cursor
-        Database cursor.
+        Active database cursor.
+    gutID_int : int
+        Project Gutenberg numeric identifier.
+    title : str
+        Title of the book.
+
+    Notes
+    -----
+    The insert uses ``INSERT OR IGNORE`` so existing records are preserved.
+    """
+    cur.execute(
+        "INSERT OR IGNORE INTO book (projGutID, title) VALUES (?, ?)",
+        (gutID_int, title)
+    )
+
+
+def get_or_create_author(cur, first, last):
+    """
+    Retrieve an existing author record or create a new one.
+
+    Parameters
+    ----------
+    cur : sqlite3.Cursor
+        Active database cursor.
     first : str or None
-        First/middle name(s), or None for mononym authors.
+        First or middle name(s). ``None`` indicates a mononym author.
     last : str
-        Last name (required).
+        Last name or full mononym name.
 
     Returns
     -------
@@ -121,7 +166,8 @@ def get_or_create_author(cur, first, last):
 
     Notes
     -----
-    - Matching is strict: both `first` and `last` must match.
+    Matching is exact on both ``first`` and ``last``.
+    If no match exists, a new row is inserted.
     """
     cur.execute(
         "SELECT id FROM author WHERE first = ? AND last = ?",
@@ -140,21 +186,22 @@ def get_or_create_author(cur, first, last):
 
 def lookup_book_and_freqs(cur, gutID_int):
     """
-    Look up a book and any stored word frequencies.
+    Retrieve stored metadata and word-frequency results for a book.
 
     Parameters
     ----------
     cur : sqlite3.Cursor
-        The database cursor.
+        Active database cursor.
     gutID_int : int
         Project Gutenberg numeric identifier.
 
     Returns
     -------
     tuple
-        (book_row, freq_rows)
-        - book_row is (projGutID, title) or None if the book is not stored.
-        - freq_rows is a list of (word, count) tuples, or None if no frequencies exist.
+        ``(book_row, freq_rows)``  
+        - ``book_row`` is ``(projGutID, title)`` or ``None`` if the book is absent.  
+        - ``freq_rows`` is a list of ``(word, count)`` pairs, or ``None`` if no
+          frequency data is stored.
     """
     cur.execute(
         "SELECT projGutID, title FROM book WHERE projGutID=?",
@@ -168,44 +215,139 @@ def lookup_book_and_freqs(cur, gutID_int):
     )
     freqs = cur.fetchall()
 
-    return book, freqs if freqs else None
+    return book, (freqs if freqs else None)
+
+
+def insert_book_author_links(cur, gutID_int, author_ids):
+    """
+    Create ordered links between a book and its authors.
+
+    Parameters
+    ----------
+    cur : sqlite3.Cursor
+        Active database cursor.
+    gutID_int : int
+        Project Gutenberg numeric identifier.
+    author_ids : list of int
+        Author IDs in the correct author order for the book.
+
+    Notes
+    -----
+    ``INSERT OR IGNORE`` prevents accidental duplicate associations.
+    """
+    for order, a_id in enumerate(author_ids, start=1):
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO bookAuthors (projGutID, author_id, author_order)
+            VALUES (?, ?, ?)
+            """,
+            (gutID_int, a_id, order)
+        )
+
+
+def get_book_title(cur, gutID_int):
+    """
+    Retrieve the stored title of a book.
+
+    Parameters
+    ----------
+    cur : sqlite3.Cursor
+        Active database cursor.
+    gutID_int : int
+        Project Gutenberg numeric identifier.
+
+    Returns
+    -------
+    str or None
+        The title if present, otherwise ``None``.
+    """
+    cur.execute(
+        "SELECT title FROM book WHERE projGutID=?",
+        (gutID_int,)
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def get_book_authors(cur, gutID_int):
+    """
+    Retrieve the ordered list of authors for a given book.
+
+    Parameters
+    ----------
+    cur : sqlite3.Cursor
+        Active database cursor.
+    gutID_int : int
+        Project Gutenberg numeric identifier.
+
+    Returns
+    -------
+    list of (str or None, str)
+        A list of ``(first, last)`` tuples in author order.
+    """
+    cur.execute("""
+        SELECT a.first, a.last
+        FROM bookAuthors ba
+        JOIN author a ON ba.author_id = a.id
+        WHERE ba.projGutID = ?
+        ORDER BY ba.author_order
+    """, (gutID_int,))
+    return cur.fetchall()
+
+
+def store_word_frequencies(cur, gutID_int, top10):
+    """
+    Store the top word-frequency results for a book.
+
+    Parameters
+    ----------
+    cur : sqlite3.Cursor
+        Active database cursor.
+    gutID_int : int
+        Project Gutenberg numeric identifier.
+    top10 : list of (str, int)
+        List of ``(word, count)`` pairs representing the top results.
+
+    Notes
+    -----
+    ``INSERT OR REPLACE`` ensures updates overwrite older values.
+    """
+    for word, count in top10:
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO wordFreqs (projGutID, word, word_count)
+            VALUES (?, ?, ?)
+            """,
+            (gutID_int, word, count)
+        )
 
 
 def load_book_list_from_db():
     """
-    Load a cleaned and formatted list of books for use in the GUI dropdown.
+    Construct a cleaned list of book display labels for use in the GUI.
 
     Returns
     -------
-    (list[str], dict[str, int])
-        display_list :
-            A list of display labels of the form:
-                "Cleaned Title (Lastname)"           -- single author
-                "Cleaned Title (Lastname et al.)"    -- multiple authors
-                "Cleaned Title (Unknown Author)"     -- no author data
-
-            Titles have leading articles ("A ", "An ", "The ") removed
-            for sorting and display purposes only.
-
-        idmap :
-            A dictionary mapping each display label → projGutID.
+    tuple
+        ``(display_list, idmap)``  
+        - ``display_list`` : list of strings formatted as  
+          ``"Cleaned Title (Lastname)"`` for one author,  
+          ``"Cleaned Title (Lastname et al.)"`` for multiple authors,  
+          or ``"Cleaned Title (Unknown Author)"`` when no author data exists.  
+        - ``idmap`` : dict mapping each display label → ``projGutID``.
 
     Notes
     -----
     - Ensures the database schema exists before reading.
-    - Author information is determined by querying bookAuthors and author.
-    - The first author's last name determines the label suffix.
-    - The original title is stored unchanged in the database;
-        only the *display* version is altered for the dropdown.
+    - Removes leading articles (“A”, “An”, “The”) *for display only*.
+    - Determines the first author's last name for label formatting.
     """
-
     try:
         con = sqlite3.connect(DB_PATH)
         cur = con.cursor()
 
         ensure_tables_exist(con)
 
-        # Load all books
         cur.execute("SELECT projGutID, title FROM book ORDER BY title;")
         rows = cur.fetchall()
 
@@ -214,15 +356,14 @@ def load_book_list_from_db():
     finally:
         try:
             con.close()
-        except:
+        except Exception:
             pass
 
     display = []
     idmap = {}
 
     for bid, title in rows:
-
-        # Get ordered list of authors
+        # Fetch authors for each book
         try:
             con = sqlite3.connect(DB_PATH)
             cur = con.cursor()
@@ -238,17 +379,14 @@ def load_book_list_from_db():
         except Exception:
             authors = []
 
-        # Determine label suffix:
+        # Determine suffix for label
         if not authors:
             suffix = "Unknown Author"
         else:
-            first_author_last = authors[0][1].strip()
-            if len(authors) == 1:
-                suffix = first_author_last
-            else:
-                suffix = f"{first_author_last} et al."
+            last = authors[0][1].strip()
+            suffix = last if len(authors) == 1 else f"{last} et al."
 
-        # Strip leading articles from titles for dropdown display
+        # Remove leading articles for display
         clean_title = title.strip()
         low = clean_title.lower()
         for art in ("a ", "an ", "the "):
@@ -256,12 +394,8 @@ def load_book_list_from_db():
                 clean_title = clean_title[len(art):]
                 break
 
-        # Build final label
         label = f"{clean_title} ({suffix})"
-
         display.append(label)
         idmap[label] = bid
 
     return display, idmap
-
-
