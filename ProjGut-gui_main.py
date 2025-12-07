@@ -26,7 +26,9 @@ Notes
 The system does not yet enforce strict author identity resolution, and
 different spellings or formats may create duplicate author records.
 
-
+Author: Karen R. Christie
+CSM CIS 117 Final Project
+Date: November–December 2025
 """
 
 import sqlite3
