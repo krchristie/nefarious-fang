@@ -4,7 +4,7 @@ helpers_db
 
 Database helper functions for the Project Gutenberg word-frequency application.
 
-This module provides all interactions with the SQLite backend, including:
+This module provides all interactions with the SQLite backend that can change the DB, including:
 
 - Ensuring the database schema exists
 - Creating or reusing author records
@@ -20,7 +20,6 @@ The database schema includes:
 
 Public API
 ----------
-
 .. autofunction:: ensure_tables_exist
 .. autofunction:: get_or_create_author
 .. autofunction:: lookup_book_and_freqs
