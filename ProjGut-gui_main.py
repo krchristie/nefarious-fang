@@ -2,29 +2,75 @@
 ProjGut GUI Application
 =======================
 
-Main Tkinter-based interface for the Project Gutenberg Word Frequency Analyzer.
+Graphical user interface for the Project Gutenberg Word-Frequency Analyzer.
 
-This application:
-- Fetches plain-text eBook files from Project Gutenberg
-- Extracts metadata (title, authors)
-- Prompts for manual entry of author information
-- Parses text to compute word frequencies (excluding stopwords)
-- Stores metadata and results in an SQLite database
-- Reuses existing stored data when available
-- Displays the top 10 most frequent non-stopword words from the selected book
+This module implements the Tkinter-based front end responsible for selecting,
+fetching, processing, and displaying word-frequency results for Project
+Gutenberg texts. It coordinates user interaction, orchestrates calls to the
+database and text-processing layers, and provides themed dialogs for structured
+user input.
 
-Components
-----------
-- Tkinter GUI with custom dialogs and themed widgets
-- Normalized SQLite schema (book, author, bookAuthors, wordFreqs)
-- Text processing utilities (tokenization, stopword filtering)
-- Interactive prompts for author entry
-- Robust error handling with progress logging
+The GUI enables users to:
+- Select an existing book from the local database
+- Enter a new Project Gutenberg ID manually
+- Fetch and parse ebook text
+- Inspect metadata such as title and authors
+- Enter or confirm author information
+- View stored or newly computed top-frequency words
+- Monitor progress via a scrolling log
+
+Available GUI components and utilities
+--------------------------------------
+- :func:`log_progress`  
+    Append status messages to the GUI's progress log.
+
+- :func:`_center_window_over_master`  
+    Position modal dialogs relative to the parent window.
+
+- :class:`_GreenBaseDialog`  
+    Base class implementing the application's green visual theme for dialogs.
+
+- :func:`ask_green_string`  
+    Prompt the user for textual input via a themed dialog.
+
+- :func:`ask_green_integer`  
+    Prompt the user for integer input with validation.
+
+- :func:`get_requested_gutenberg_id`  
+    Determine the Gutenberg ID based on manual entry or dropdown selection.
+
+- :func:`open_bio_shelf`  
+    Open the Project Gutenberg biology bookshelf in a web browser.
+
+- :class:`CustomButton`  
+    Styled button class with hover effects and custom colors.
+
+- :func:`refresh_dropdown`  
+    Reload and repopulate the book-selection combobox using the database.
+
+- :func:`show_top10_from_db`  
+    Display stored top-frequency results for a selected book.
+
+- :func:`clear_fields`  
+    Reset all entry fields, results, and progress logs.
+
+- :func:`close_window`  
+    Terminate the application cleanly.
+
+- :func:`click`  
+    Main controller for the SUBMIT workflow: fetch text, collect author
+    metadata, compute word frequencies, store results, and update the GUI.
 
 Notes
 -----
-The system does not yet enforce strict author identity resolution, and
-different spellings or formats may create duplicate author records.
+- The GUI performs **no direct SQL beyond delegated calls** to functions in
+  ``helpers_db``.
+- All text parsing and frequency computation is delegated to functions in
+  ``helpers_text``.
+- Progress logging and all user interaction occur exclusively through Tkinter
+  widgets; backend modules remain GUI-agnostic.
+- The system does not enforce strict author identity resolution; inconsistent
+  naming may lead to duplicate author entries.
 
 Author: Karen R. Christie
 CSM CIS 117 Final Project
@@ -36,25 +82,43 @@ import webbrowser
 from tkinter import *
 from tkinter.ttk import Combobox, Style
 from helpers_text import (
-    make_gutenberg_link, fetch_gutenberg_text, extract_title,
-    extract_author_block, load_stopwords, MyHTMLParser
+    make_gutenberg_link,
+    fetch_gutenberg_text,
+    extract_title,
+    extract_author_block,
+    load_stopwords,
+    MyHTMLParser
 )
 from helpers_db import (
-    DB_PATH, ensure_tables_exist, get_or_create_author,
-    lookup_book_and_freqs, load_book_list_from_db
+    DB_PATH,
+    ensure_tables_exist,
+    get_or_create_author,
+    lookup_book_and_freqs,
+    load_book_list_from_db,
+    insert_book,
+    insert_book_author_links,
+    get_book_title,
+    get_book_authors,
+    store_word_frequencies
 )
 
 # -------------------------------------------
 # function that reports progress log messages
 # -------------------------------------------
+
 def log_progress(msg):
     """
-    Append a status message to the progress log text widget and scroll to the end.
+    Append a message to the GUI progress log and scroll to the end.
 
     Parameters
     ----------
     msg : str
-        The message to append.
+        Text to append to the progress log widget.
+
+    Side effects
+    ------------
+    - Inserts text into the global `progress_output` widget.
+    - Scrolls to the most recent line.
     """
     progress_output.insert(END, msg)
     progress_output.see(END)
@@ -62,21 +126,22 @@ def log_progress(msg):
 # --------------------------------
 # GUI helper dialogs (green theme)
 # --------------------------------
+
 from tkinter import Toplevel, Label, Entry, Button, StringVar
 
 def _center_window_over_master(dlg, master):
     """
-    Center a dialog window (`dlg`) over its parent window (`master`).
+    Center a dialog window over its parent window.
 
-    Ensures the dialog appears within the visible bounds of the master window,
-    even if the master has been moved or resized.
+    Ensures that the dialog appears visually aligned with the master window,
+    even if the parent has been moved or resized.
 
     Parameters
     ----------
     dlg : tkinter.Toplevel
-        The dialog window to position.
+        The dialog window to reposition.
     master : tkinter.Widget
-        The parent window over which the dialog is centered.
+        The parent window that provides the reference position.
     """
     dlg.update_idletasks()
     mw = master.winfo_width()
@@ -95,13 +160,17 @@ class _GreenBaseDialog(Toplevel):
 
     Features
     --------
-    • Non-resizable `Toplevel` window
-    • Standardized background color (#C9F2CE)
-    • Title bar text (if provided)
-    • ESC/close button handling (returns None)
-    • Storage for dialog result via `self.result`
-    """
+    - Non-resizable top-level dialog
+    - Standardized background color and theme settings
+    - Optional title-bar label
+    - ESC/close-button handling that returns ``None``
+    - Storage of user selections via ``self.result``
 
+    Notes
+    -----
+    This class is not intended for direct instantiation. Helper functions
+    such as :func:`ask_green_string` and :func:`ask_green_integer` build on it.
+    """
     def __init__(self, master, title):
         super().__init__(master)
         self.transient(master)
@@ -118,25 +187,26 @@ class _GreenBaseDialog(Toplevel):
 
 def ask_green_string(master, title, prompt, initial="", allow_empty=False):
     """
-    Display a modal green-themed dialog prompting the user for a string.
+    Present a themed modal dialog prompting the user for a string.
 
     Parameters
     ----------
     master : tkinter.Widget
-        Parent window.
+        Parent window for the dialog.
     title : str
-        Title displayed in the dialog's title bar.
+        Text for the dialog's title bar.
     prompt : str
-        Instruction text shown above the entry field.
+        Instructional text shown above the entry field.
     initial : str, optional
-        Initial text to pre-fill in the entry field.
+        Optional initial value to prepopulate the input field.
     allow_empty : bool, optional
-        If True, empty input is accepted and returned as "".
+        If True, an empty string is accepted and returned as ``""``.
+        If False, empty input prompts the user to re-enter a value.
 
     Returns
     -------
     str or None
-        The user-entered string (stripped of whitespace), or None if canceled.
+        The trimmed user input, or ``None`` if the dialog is canceled.
     """
     # check "or None if cancelled"
     dlg = _GreenBaseDialog(master, title)
@@ -181,27 +251,33 @@ def ask_green_string(master, title, prompt, initial="", allow_empty=False):
 
 def ask_green_integer(master, title, prompt, initial=None, minvalue=None, maxvalue=None):
     """
-    Display a modal green-themed dialog prompting the user for an integer.
+    Present a themed modal dialog prompting the user for a validated integer.
 
     Parameters
     ----------
     master : tkinter.Widget
-        Parent window.
+        Parent window for the dialog.
     title : str
         Dialog title.
     prompt : str
-        Prompt text displayed inside the dialog.
-    initial : int or None
-        Optional integer to pre-populate in the entry box.
-    minvalue : int or None
-        Optional minimum allowed value.
-    maxvalue : int or None
-        Optional maximum allowed value.
+        Instructional text displayed above the entry field.
+    initial : int or None, optional
+        Optional integer value to prepopulate the entry field.
+    minvalue : int or None, optional
+        Minimum acceptable value for validation.
+    maxvalue : int or None, optional
+        Maximum acceptable value for validation.
 
     Returns
     -------
     int or None
-        The validated integer entered by the user, or None if canceled.
+        The validated integer entered by the user, or ``None`` if canceled.
+
+    Notes
+    -----
+    Validation covers:
+    - Integer parsing
+    - Optional range constraints (minvalue/maxvalue)
     """
     dlg = _GreenBaseDialog(master, title)
     Label(dlg, text=prompt, bg="#C9F2CE", fg="#1F6B2D",
@@ -294,21 +370,22 @@ gutenberg_id_var = StringVar()
 # --------------------------------------------------------
 
 # GUI utilities: input helper
+
 def get_requested_gutenberg_id():
     """
-    Determine which Project Gutenberg ID the user intends to use.
+    Determine the intended Project Gutenberg ID based on user input.
 
     Priority
     --------
-    1. Manual entry from the text field
-    2. Selected book in the dropdown
+    1. Numeric value entered in the manual ID field
+    2. Selection from the dropdown list of existing books
 
     Returns
     -------
     tuple
-        (gutID, error_message)
-        - gutID is an int when valid, otherwise None
-        - error_message is None on success, otherwise a descriptive string
+        ``(gutID, error_message)`` where:
+        - ``gutID`` is the parsed integer ID or ``None`` on failure.
+        - ``error_message`` is a descriptive string or ``None`` on success.
     """
     manual = gutenberg_id_var.get().strip()
     if manual:
@@ -328,22 +405,32 @@ def get_requested_gutenberg_id():
     except Exception:
         return None, "Invalid Project Gutenberg book ID."
 
+
 # GUI utilities: linkout function
+
 def open_bio_shelf():
     """
-    Open the Project Gutenberg biology bookshelf in the user's default web browser.
+    Open the Project Gutenberg biology bookshelf in the user's default browser.
+
+    Side effects
+    ------------
+    Launches the system web browser using :mod:`webbrowser`.
     """
     webbrowser.open("https://www.gutenberg.org/ebooks/bookshelf/669")
 
+
 # GUI utilities: styling of custom widgits
+
 class CustomButton(Button):
     """
-    A stylized Tkinter Button with a green on gray theme and effects on clicking the button.
+    A stylized Tkinter button with custom colors, typography, and hover effects.
 
-    Includes:
-    - Custom fonts and padding
-    - Flat style
-    - Color transitions on mouse enter/leave
+    Features
+    --------
+    - Customized background, hover, and active colors
+    - Bold decorative font choice
+    - Flat relief and padding for a modern appearance
+    - Hover event bindings to update visual state
     """
     def __init__(self, master=None, **kwargs):
         super().__init__(master, **kwargs)
@@ -368,16 +455,18 @@ class CustomButton(Button):
     def on_hover(self, e): self.config(bg=self.hover_bg)
     def on_leave(self, e): self.config(bg=self.default_bg)
 
+
 # GUI utilities: DB access to provide data to GUI
+
 def refresh_dropdown():
     """
-    Reload the book list from the database and repopulate the dropdown widget.
+    Reload the book list from the database and update the dropdown widget.
 
     Side effects
     ------------
-    - Updates global variables `dropdown`, `book_choice`, and `id_map`
-    - Replaces dropdown values with the latest titles from the database
-    - Resets the displayed selection to '__ select a book __'
+    - Replaces the combobox `values` list with fresh database entries.
+    - Updates the global ``id_map`` used for ID lookup.
+    - Resets the displayed selection to ``"__ select a book __"``.
     """
     global dropdown, book_choice, id_map
     new_book_list, new_id_map = load_book_list_from_db()
@@ -387,20 +476,20 @@ def refresh_dropdown():
 
 def show_top10_from_db(freq_rows, gutID_int):
     """
-    Display the stored top word frequencies for a given Gutenberg book.
+    Display stored top word frequencies for a selected book.
 
     Parameters
     ----------
-    freq_rows : iterable of (word, count)
-        Rows retrieved from the wordFreqs table.
+    freq_rows : iterable of (str, int)
+        Word-frequency pairs retrieved from the database.
     gutID_int : int
-        Numeric Project Gutenberg ID.
+        Project Gutenberg numeric identifier.
 
     Side effects
     ------------
-    - Clears and rewrites the `words_output` text widget
-    - Retrieves book title and all associated authors from the database
-    - Displays formatted title, author list, and the top 10 words
+    - Clears and repopulates the `words_output` widget.
+    - Retrieves and formats book metadata (title and authors).
+    - Prints frequency results in a structured table format.
     """
     words_output.delete("1.0", END)
 
@@ -408,57 +497,53 @@ def show_top10_from_db(freq_rows, gutID_int):
         con = sqlite3.connect(DB_PATH)
         cur = con.cursor()
 
-        # Title
-        cur.execute("SELECT title FROM book WHERE projGutID=?", (gutID_int,))
-        title_row = cur.fetchone()
+        # Retrieve title and authors using helper functions
+        title = get_book_title(cur, gutID_int)
+        authors = get_book_authors(cur, gutID_int)
 
-        # Authors (possibly multiple)
-        cur.execute("""
-            SELECT a.first, a.last
-            FROM bookAuthors ba
-            JOIN author a ON ba.author_id = a.id
-            WHERE ba.projGutID = ?
-            ORDER BY ba.author_order
-        """, (gutID_int,))
-        authors = cur.fetchall()
         con.close()
+
     except Exception as e:
         words_output.insert(END, f"(Error fetching author/title: {e})\n\n")
         return
 
-    # Format authors 
-    formatted_authors = []
-    for first, last in authors:
-        if first is None or str(first).strip().lower() in ("", "none", "null"):
-            formatted_authors.append(f"{last}")
-        else:
-            formatted_authors.append(f"{first} {last}")
-    author_str = ", ".join(formatted_authors) if formatted_authors else "Unknown Author"
-
-    if title_row:
-        display_title = title_row[0].strip()
+    # ----- Format authors -----
+    if not authors:
+        author_str = "Unknown Author"
     else:
-        display_title = f"Book {gutID_int}"    # fallback, rare
+        formatted = []
+        for first, last in authors:
+            if not first or first.strip().lower() in ("", "none", "null"):
+                formatted.append(last)
+            else:
+                formatted.append(f"{first} {last}")
+        author_str = ", ".join(formatted)
+
+    display_title = title or f"Book {gutID_int}"
 
     words_output.insert(END, f"\n{display_title}\n\nby {author_str}\n\n")
 
-    # Print word frequencies 
+    # ----- Print Top 10 Words -----
     sorted_rows = sorted(freq_rows, key=lambda x: x[1], reverse=True)
+
     words_output.insert(END, f"  {'Word frequency':>1}  {'Word':<20} \n")
     words_output.insert(END, f"  {'______________':>1}  {'______________':<20} \n")
 
     for word, count in sorted_rows[:10]:
         words_output.insert(END, f"{count:>16}  {word:<20} \n")
 
+
 # GUI utilities: reset & cleanup helpers
+
 def clear_fields():
     """
-    Reset all user-input fields and clear displayed results/logs.
+    Reset user input fields and clear all displayed output.
 
-    Side effects:
-    - Resets dropdown
-    - Clears the Project Gutenberg book ID entry
-    - Clears the progress and output text areas
+    Side effects
+    ------------
+    - Resets dropdown selection
+    - Clears manual ID entry
+    - Clears progress log and top-words display areas
     """
     book_choice.set("__ select a book __")
     gutenberg_id_var.set("")
@@ -467,7 +552,11 @@ def clear_fields():
 
 def close_window():
     """
-    Close the Tkinter application cleanly without triggering an IDLE warning.
+    Close the GUI application gracefully.
+
+    Side effects
+    ------------
+    Stops the Tkinter event loop and destroys the main window.
     """
     window.quit()      # Stops the Tkinter mainloop
     window.destroy()   # Closes the window completely
@@ -477,34 +566,30 @@ def close_window():
 # ---------------------------------
 def click():
     """
-    Main controller for the SUBMIT button.
+    Primary controller for the SUBMIT button workflow.
 
     Workflow
     --------
-    1. Determine requested Gutenberg ID (manual entry or dropdown)
-    2. Connect to SQLite and ensure required tables exist
-    3. Check whether stored frequencies already exist:
-        - If yes → display results immediately
-    4. If new:
-        - Fetch Gutenberg text
-        - Extract title and log it
-        - Insert book record (if not present)
-        - Extract and log the raw author block
-        - Ask user for number of authors
-        - Collect author names and create/lookup author records
-        - Link book ↔ authors in bookAuthors
-        - Parse full text using MyHTMLParser
-        - Load stopwords
-        - Compute complete frequency counts
-        - Store top 10 into wordFreqs
-    5. Display stored top 10 frequencies
-    6. Update dropdown list and clear manual ID entry
+    1. Determine the target Project Gutenberg ID.
+    2. Connect to SQLite and ensure required tables exist.
+    3. If stored frequencies exist, display them immediately.
+    4. Otherwise:
+        - Fetch ebook text
+        - Extract and log metadata
+        - Insert or update the book record
+        - Prompt the user for author information
+        - Create or fetch author records
+        - Link authors to the book
+        - Parse text and compute word frequencies
+        - Store the top 10 results in the database
+    5. Display the final results and refresh GUI state.
 
     Side effects
     ------------
-    Writes progress updates to the `progress_output` widget.
-    Writes final results to `words_output`.
-    Interacts with the database via helpers and direct SQL.
+    - Writes detailed progress information to the `progress_output` widget.
+    - Writes formatted frequency results to the `words_output` widget.
+    - Performs multiple database writes through helper functions.
+    - Interacts with HTML parsing and stopword loading subsystems.
     """
     # Reset user-visible text areas
     progress_output.delete("1.0", END)
@@ -554,10 +639,7 @@ def click():
         # Insert book (if new)
         if book_row is None:
             try:
-                cur.execute(
-                    "INSERT INTO book (projGutID, title) VALUES (?, ?)",
-                    (gutID_int, book_title)
-                )
+                insert_book(cur, gutID_int, book_title)
                 con.commit()
                 log_progress(f"Inserted NEW book record:\n  ID={gutID_int}\n  Title='{book_title}'\n\n\n")
             except sqlite3.IntegrityError:
@@ -625,13 +707,7 @@ def click():
         # Insert relationships into bookAuthors
         try:
             for order, a_id in enumerate(author_ids, start=1):
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO bookAuthors (projGutID, author_id, author_order)
-                    VALUES (?, ?, ?)
-                    """,
-                    (gutID_int, a_id, order)
-                )
+                insert_book_author_links(cur, gutID_int, author_ids)
                 log_progress(f"Linked Book {gutID_int} → Author {a_id} (order = {order})\n")
             con.commit()
             log_progress("\nAuthor linkage completed.\n\n\n")
@@ -662,12 +738,8 @@ def click():
 
             log_progress("Storing Top 10 word frequencies...\n")
             for word, count in top10:
-                cur.execute(
-                    "INSERT OR REPLACE INTO wordFreqs (projGutID, word, word_count) VALUES (?, ?, ?)",
-                    (gutID_int, word, count)
-                )
+                store_word_frequencies(cur, gutID_int, top10)
                 log_progress(f"  {word:<15} → {count}\n")
-
             con.commit()
 
         except Exception as e:
